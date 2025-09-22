@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 import numpy as np
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Tokenize dataset and compute token lengths")
+    parser = argparse.ArgumentParser(description="Tokenize dataset and compute token lengths per field")
     parser.add_argument("--base_model_dir", type=str, required=True, help="Path to base model directory")
     parser.add_argument("--eval_path", type=str, required=True, help="Path to evaluation CSV")
     parser.add_argument("--output_csv", type=str, default="./tokenized_dataset.csv", help="Where to save dataset with token length")
@@ -35,7 +35,8 @@ FEW_SHOTS = [
     },
 ]
 
-def build_input_fs(context, prompt, response):
+def build_fs_prefix():
+    """Xây dựng phần few-shot demonstration, không gộp với input chính"""
     header = f"{INSTRUCT}\n"
     demonstrations = ""
     for ex in FEW_SHOTS:
@@ -45,23 +46,7 @@ def build_input_fs(context, prompt, response):
             f"Response: {ex['response']}\n"
             f"Label: {ex['label']}\n\n"
         )
-    query = (
-        f"Context: {context}\n"
-        f"Prompt: {prompt}\n"
-        f"Response: {response}\n"
-        f"Label:"
-    )
-    return header + demonstrations + query
-
-def build_input(context, prompt, response):
-    header = f"{INSTRUCT}\n"
-    query = (
-        f"Context: {context}\n"
-        f"Prompt: {prompt}\n"
-        f"Response: {response}\n"
-        f"Label:"
-    )
-    return header + query
+    return header + demonstrations
 
 
 def main():
@@ -71,8 +56,9 @@ def main():
     df_eval = pd.read_csv(args.eval_path)
 
     # Drop old token_length if exists
-    if "token_length" in df_eval.columns:
-        df_eval = df_eval.drop("token_length", axis=1)
+    for col in ["context_len", "prompt_len", "response_len"]:
+        if col in df_eval.columns:
+            df_eval = df_eval.drop(col, axis=1)
 
     dataset_eval = Dataset.from_pandas(df_eval, preserve_index=False)
 
@@ -82,32 +68,49 @@ def main():
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         print("Added new pad token.")
 
-    print("Building text inputs...")
-    if args.fewshot:
-        texts = [build_input_fs(c, p, r) for c, p, r in zip(df_eval["context"], df_eval["prompt"], df_eval["response"])]
-    else:
-        texts = [build_input(c, p, r) for c, p, r in zip(df_eval["context"], df_eval["prompt"], df_eval["response"])]
+    # Build fewshot prefix if needed
+    fs_prefix = build_fs_prefix() if args.fewshot else ""
 
-    print("Tokenizing...")
-    tokenized = tokenizer(texts, truncation=True, padding=False)
+    print("Tokenizing fields separately...")
+    context_texts = [fs_prefix + "Context: " + str(c) for c in df_eval["context"]]
+    prompt_texts  = [fs_prefix + "Prompt: "  + str(p) for p in df_eval["prompt"]]
+    response_texts= [fs_prefix + "Response: "+ str(r) for r in df_eval["response"]]
 
-    # Compute token lengths
-    lengths = [len(ids) for ids in tokenized["input_ids"]]
-    df_eval["token_length"] = lengths
+    context_tokens  = tokenizer(context_texts, truncation=True, padding=False)["input_ids"]
+    prompt_tokens   = tokenizer(prompt_texts, truncation=True, padding=False)["input_ids"]
+    response_tokens = tokenizer(response_texts, truncation=True, padding=False)["input_ids"]
+
+    # Save lengths into dataframe
+    df_eval["context_len"]  = [len(ids) for ids in context_tokens]
+    df_eval["prompt_len"]   = [len(ids) for ids in prompt_tokens]
+    df_eval["response_len"] = [len(ids) for ids in response_tokens]
 
     # Save dataset with token length
     df_eval.to_csv(args.output_csv, index=False)
     print(f"Saved tokenized dataset with lengths to {args.output_csv}")
 
     # Statistics
-    arr = np.array(lengths)
     stats = {
-        "min": int(arr.min()),
-        "max": int(arr.max()),
-        "mean": float(arr.mean()),
-        "median": float(np.median(arr))
+        "context": {
+            "min": int(np.min(df_eval["context_len"])),
+            "max": int(np.max(df_eval["context_len"])),
+            "mean": float(np.mean(df_eval["context_len"])),
+            "median": float(np.median(df_eval["context_len"]))
+        },
+        "prompt": {
+            "min": int(np.min(df_eval["prompt_len"])),
+            "max": int(np.max(df_eval["prompt_len"])),
+            "mean": float(np.mean(df_eval["prompt_len"])),
+            "median": float(np.median(df_eval["prompt_len"]))
+        },
+        "response": {
+            "min": int(np.min(df_eval["response_len"])),
+            "max": int(np.max(df_eval["response_len"])),
+            "mean": float(np.mean(df_eval["response_len"])),
+            "median": float(np.median(df_eval["response_len"]))
+        }
     }
-    print("Token length statistics:", stats)
+    print("Token length statistics per field:", stats)
 
 
 if __name__ == "__main__":
